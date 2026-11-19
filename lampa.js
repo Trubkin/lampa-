@@ -6,27 +6,69 @@
     var STORAGE_PROXY = 'serialytut_cors_proxy';
     var DEFAULT_MIRROR = 'https://serialytut.me';
 
-    // Вспомогательная функция для запросов (учитывает CORS-прокси для веб-версии)
-    function requestUrl(url, onSuccess, onError, postData) {
-        var proxy = (Lampa.Storage.get(STORAGE_PROXY, '') || '').trim();
-        var targetUrl = proxy ? proxy + encodeURIComponent(url) : url;
-        var network = new Lampa.Reguest();
+    // Цепочка публичных CORS-прокси для веб-версии (GET-запросы через чистый fetch без лишних заголовков)
+    var FALLBACK_PROXIES = [
+        function (u) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u); },
+        function (u) { return 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u); },
+        function (u) { return 'https://corsproxy.io/?url=' + encodeURIComponent(u); }
+    ];
 
-        network.native(
-            targetUrl,
-            function (response) {
-                onSuccess(response);
-            },
-            function (err) {
-                if (onError) onError(err);
-            },
-            postData || false,
-            { dataType: 'text' }
-        );
+    function fetchWithFallback(url, onSuccess, onError) {
+        var customProxy = (Lampa.Storage.get(STORAGE_PROXY, '') || '').trim();
+        var queue = [];
+
+        if (customProxy) {
+            queue.push(function (u) { return customProxy + encodeURIComponent(u); });
+        }
+
+        // На Android/SmartTV сначала пробуем прямой запрос через нативный движок Lampa
+        var isWeb = location.protocol.indexOf('http') === 0 && !window.AndroidJS && !(window.lampa_settings && window.lampa_settings.native);
+        if (!isWeb) {
+            queue.push(function (u) { return u; });
+        }
+
+        FALLBACK_PROXIES.forEach(function (fn) {
+            queue.push(fn);
+        });
+
+        var index = 0;
+
+        function tryNext() {
+            if (index >= queue.length) {
+                if (onError) onError(new Error('Все прокси недоступны или заблокированы'));
+                return;
+            }
+
+            var buildUrl = queue[index++];
+            var targetUrl = buildUrl(url);
+
+            fetch(targetUrl, {
+                method: 'GET',
+                credentials: 'omit'
+            })
+                .then(function (res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                })
+                .then(function (text) {
+                    if (!text || text.length < 100) throw new Error('Пустой ответ');
+                    onSuccess(text);
+                })
+                .catch(function (err) {
+                    console.warn('[Serialytut] Попытка ' + index + ' не удалась (' + targetUrl + '):', err.message);
+                    tryNext();
+                });
+        }
+
+        tryNext();
     }
 
     function getBaseUrl() {
         return (Lampa.Storage.get(STORAGE_MIRROR, DEFAULT_MIRROR) || DEFAULT_MIRROR).replace(/\/+$/, '');
+    }
+
+    function buildSearchUrl(baseUrl, query) {
+        return baseUrl + '/index.php?do=search&subaction=search&story=' + encodeURIComponent(query);
     }
 
     // Регистрация компонента каталога/поиска для главного меню
@@ -49,10 +91,9 @@
 
             function loadCatalog(query) {
                 var baseUrl = getBaseUrl();
-                var url = query ? baseUrl + '/index.php?do=search' : baseUrl + '/';
-                var postData = query ? { do: 'search', subaction: 'search', story: query } : false;
+                var url = query ? buildSearchUrl(baseUrl, query) : baseUrl + '/';
 
-                requestUrl(
+                fetchWithFallback(
                     url,
                     function (rawHtml) {
                         self.activity.loader(false);
@@ -60,12 +101,6 @@
 
                         var items = parseCardsFromHtml(rawHtml, baseUrl);
 
-                        if (!items.length) {
-                            html.append('<div style="padding: 1.5em;">Ничего не найдено. Проверьте зеркало или CORS-прокси в Настройках → Парсер.</div>');
-                            return;
-                        }
-
-                        // Кнопка нового поиска прямо внутри раздела
                         var searchBtn = $(
                             '<div class="selector" style="padding: 1em 1.5em; margin: 0 1.5em 1em; background: rgba(255,255,255,0.1); border-radius: 0.5em; display: inline-block;">' +
                                 '🔍 Поиск по сайту' + (query ? ' (' + query + ')' : '') +
@@ -98,6 +133,12 @@
 
                         html.append(searchBtn);
 
+                        if (!items.length) {
+                            html.append('<div style="padding: 1.5em;">Ничего не найдено или сайт вернул защиту от ботов. Попробуйте другое зеркало в Настройки → Парсер.</div>');
+                            Lampa.Controller.enable('content');
+                            return;
+                        }
+
                         var grid = $('<div style="display: flex; flex-wrap: wrap; padding: 0 1em;"></div>');
 
                         items.forEach(function (item) {
@@ -125,9 +166,8 @@
                     },
                     function () {
                         self.activity.loader(false);
-                        info.text('Ошибка загрузки сайта. Для веб-версии укажите CORS-прокси в Настройки → Парсер.');
-                    },
-                    postData
+                        info.text('Не удалось загрузить сайт ни через один прокси. Проверьте доступность зеркала в Настройки → Парсер.');
+                    }
                 );
             }
 
@@ -226,8 +266,8 @@
         Lampa.Noty.show('Поиск «' + title + '»...');
         var baseUrl = getBaseUrl();
 
-        requestUrl(
-            baseUrl + '/index.php?do=search',
+        fetchWithFallback(
+            buildSearchUrl(baseUrl, title),
             function (rawHtml) {
                 var items = parseCardsFromHtml(rawHtml, baseUrl);
                 if (!items.length) {
@@ -249,9 +289,8 @@
                 });
             },
             function () {
-                Lampa.Noty.show('Ошибка сети или CORS-блокировка');
-            },
-            { do: 'search', subaction: 'search', story: title }
+                Lampa.Noty.show('Ошибка загрузки через CORS-прокси');
+            }
         );
     }
 
@@ -259,7 +298,7 @@
     function openSerialSources(title, pageUrl) {
         Lampa.Noty.show('Получаем ссылки на видео...');
 
-        requestUrl(
+        fetchWithFallback(
             pageUrl,
             function (html) {
                 var streams = extractDirectStreams(html);
@@ -269,7 +308,6 @@
 
                 var options = [];
 
-                // 1. Прямые видеопотоки, найденные прямо в коде страницы
                 streams.forEach(function (streamUrl, i) {
                     options.push({
                         title: '▶ Прямой поток #' + (i + 1),
@@ -279,7 +317,6 @@
                     });
                 });
 
-                // 2. Встроенные балансеры (iframe)
                 iframes.forEach(function (frame, i) {
                     var src = frame.getAttribute('src') || frame.getAttribute('data-src') || '';
                     if (src && !/(google|yandex|vk\.com\/widget)/i.test(src)) {
@@ -326,7 +363,7 @@
     function resolveIframeAndPlay(title, iframeUrl) {
         Lampa.Noty.show('Извлекаем поток из балансера...');
 
-        requestUrl(
+        fetchWithFallback(
             iframeUrl,
             function (iframeHtml) {
                 var directLinks = extractDirectStreams(iframeHtml);
@@ -344,13 +381,11 @@
                         Lampa.Player.playlist(playlist);
                     }
                 } else {
-                    // Если балансер шифрует ссылки через JS, открываем его плеер в новой вкладке
                     Lampa.Noty.show('Балансер защищён JS — открываем плеер в окне');
                     window.open(iframeUrl, '_blank');
                 }
             },
             function () {
-                // Фоллбэк: если iframe заблокирован для парсинга, открываем напрямую
                 window.open(iframeUrl, '_blank');
             }
         );
@@ -371,7 +406,6 @@
     function initPlugin() {
         registerCatalogComponent();
 
-        // Настройки в разделе "Парсер"
         Lampa.SettingsApi.addParam({
             component: 'parser',
             param: {
@@ -398,8 +432,8 @@
                 default: ''
             },
             field: {
-                name: 'Serialytut: CORS-прокси (для веб-версии)',
-                description: 'Например: https://corsproxy.io/? (оставьте пустым на Android TV)'
+                name: 'Serialytut: свой CORS-прокси (необязательно)',
+                description: 'Оставьте пустым для авто-подбора прокси'
             },
             onChange: function (val) {
                 Lampa.Storage.set(STORAGE_PROXY, val.trim());
