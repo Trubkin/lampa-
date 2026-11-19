@@ -1,0 +1,13 @@
+{
+  "seasons": [
+    {
+      "number": 1,
+      "episodes": [
+        { "number": 1, "title": "Тест mp4",
+          "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" },
+        { "number": 2, "title": "Тест HLS",
+          "url": "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" }
+      ]
+    }
+  ]
+}
