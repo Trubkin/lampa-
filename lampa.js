@@ -220,7 +220,7 @@
 
         Lampa.SettingsApi.addParam({
             component: NAME,
-            param: { name: STORAGE_URL, type: 'input', 'default': '', placeholder: 'https://my-server.local/api' },
+            param: { name: STORAGE_URL, type: 'input', values: '', 'default': '', placeholder: 'https://my-server.local/api' },
             field: { name: 'Адрес источника', description: 'Базовый URL вашего JSON-источника' }
         });
     }
